@@ -9,6 +9,7 @@ namespace TerrariaApi.Server.Hooking;
 internal class NetHooks
 {
 	private static HookManager _hookManager;
+	private static DateTime _lastFullSlotDiagnosticUtc = DateTime.MinValue;
 
 	public static readonly object syncRoot = new();
 
@@ -185,29 +186,86 @@ internal class NetHooks
 	{
 		if (!args.ContinueExecution) return;
 		args.ContinueExecution = false;
-		int slot = FindNextOpenClientSlot();
-		if (slot != -1)
-		{
-			Netplay.Clients[slot].Reset();
-			Netplay.Clients[slot].Socket = args.client;
-			return;
-		}
 
-		Netplay.KickClient(args.client, NetworkText.FromKey("CLI.ServerIsFull"));
-	}
+		int slot = -1;
+		bool logFullSlotDiagnostics = false;
 
-	static int FindNextOpenClientSlot()
-	{
 		lock (syncRoot)
 		{
 			for (int i = 0; i < Main.maxNetPlayers; i++)
 			{
 				if (!Netplay.Clients[i].IsConnected())
 				{
-					return i;
+					slot = i;
+					Netplay.Clients[i].Reset();
+					Netplay.Clients[i].Socket = args.client;
+					break;
 				}
 			}
+
+			if (slot == -1 && DateTime.UtcNow - _lastFullSlotDiagnosticUtc >= TimeSpan.FromSeconds(30))
+			{
+				_lastFullSlotDiagnosticUtc = DateTime.UtcNow;
+				logFullSlotDiagnostics = true;
+			}
 		}
-		return -1;
+
+		if (slot != -1)
+		{
+			return;
+		}
+
+		if (logFullSlotDiagnostics)
+		{
+			LogFullSlotDiagnostics();
+		}
+
+		Netplay.KickClient(args.client, NetworkText.FromKey("CLI.ServerIsFull"));
+	}
+
+	static void LogFullSlotDiagnostics()
+	{
+		Console.WriteLine($"[TSAPI] No open client slots. Dumping {Main.maxNetPlayers} RemoteClient entries:");
+		for (int i = 0; i < Main.maxNetPlayers; i++)
+		{
+			RemoteClient client = Netplay.Clients[i];
+			bool clientConnected;
+			bool socketConnected;
+			string remoteAddress;
+
+			try
+			{
+				clientConnected = client.IsConnected();
+			}
+			catch (Exception ex)
+			{
+				clientConnected = false;
+				Console.WriteLine($"[TSAPI] Slot {i}: client IsConnected() threw {ex.GetType().Name}: {ex.Message}");
+			}
+
+			try
+			{
+				socketConnected = client.Socket?.IsConnected() ?? false;
+			}
+			catch
+			{
+				socketConnected = false;
+			}
+
+			try
+			{
+				remoteAddress = client.Socket == null ? "<null>" : client.Socket.GetRemoteAddress().ToString();
+			}
+			catch (Exception ex)
+			{
+				remoteAddress = $"<error:{ex.GetType().Name}>";
+			}
+
+			Console.WriteLine(
+				$"[TSAPI] Slot {i}: State={client.State}, IsActive={client.IsActive}, " +
+				$"ClientConnected={clientConnected}, SocketConnected={socketConnected}, " +
+				$"TimeOutTimer={client.TimeOutTimer}, PendingTerminationApproved={client.PendingTerminationApproved}, " +
+				$"SocketNull={client.Socket == null}, Remote={remoteAddress}");
+		}
 	}
 }
