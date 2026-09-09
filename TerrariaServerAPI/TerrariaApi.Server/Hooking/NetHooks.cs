@@ -3,6 +3,7 @@ using System;
 using Terraria;
 using Terraria.Localization;
 using Terraria.Net;
+using Terraria.Net.Sockets;
 
 namespace TerrariaApi.Server.Hooking;
 
@@ -220,7 +221,72 @@ internal class NetHooks
 			LogFullSlotDiagnostics();
 		}
 
-		Netplay.KickClient(args.client, NetworkText.FromKey("CLI.ServerIsFull"));
+		Netplay.KickClient(new CloseAfterSendSocket(args.client), NetworkText.FromKey("CLI.ServerIsFull"));
+	}
+
+	private sealed class CloseAfterSendSocket : ISocket
+	{
+		private readonly ISocket _inner;
+
+		public CloseAfterSendSocket(ISocket inner)
+		{
+			_inner = inner;
+		}
+
+		void ISocket.Close()
+		{
+			_inner.Close();
+		}
+
+		bool ISocket.IsConnected()
+		{
+			return _inner.IsConnected();
+		}
+
+		void ISocket.Connect(RemoteAddress address)
+		{
+			_inner.Connect(address);
+		}
+
+		void ISocket.AsyncSend(byte[] data, int offset, int size, SocketSendCallback callback, object state)
+		{
+			_inner.AsyncSend(data, offset, size, callbackState =>
+			{
+				try
+				{
+					callback(callbackState);
+				}
+				finally
+				{
+					_inner.Close();
+				}
+			}, state);
+		}
+
+		void ISocket.AsyncReceive(byte[] data, int offset, int size, SocketReceiveCallback callback, object state)
+		{
+			_inner.AsyncReceive(data, offset, size, callback, state);
+		}
+
+		bool ISocket.IsDataAvailable()
+		{
+			return _inner.IsDataAvailable();
+		}
+
+		RemoteAddress ISocket.GetRemoteAddress()
+		{
+			return _inner.GetRemoteAddress();
+		}
+
+		bool ISocket.StartListening(SocketConnectionAccepted callback)
+		{
+			return _inner.StartListening(callback);
+		}
+
+		void ISocket.StopListening()
+		{
+			_inner.StopListening();
+		}
 	}
 
 	static void LogFullSlotDiagnostics()
