@@ -1,13 +1,16 @@
-﻿using OTAPI;
+using OTAPI;
 using System;
 using Terraria;
+using Terraria.Localization;
 using Terraria.Net;
+using Terraria.Net.Sockets;
 
 namespace TerrariaApi.Server.Hooking;
 
 internal class NetHooks
 {
 	private static HookManager _hookManager;
+	private static DateTime _lastFullSlotDiagnosticUtc = DateTime.MinValue;
 
 	public static readonly object syncRoot = new();
 
@@ -184,30 +187,151 @@ internal class NetHooks
 	{
 		if (!args.ContinueExecution) return;
 		args.ContinueExecution = false;
-		int slot = FindNextOpenClientSlot();
-		if (slot != -1)
-		{
-			Netplay.Clients[slot].Reset();
-			Netplay.Clients[slot].Socket = args.client;
-		}
-		if (FindNextOpenClientSlot() == -1)
-		{
-			Netplay.TcpListener?.StopListening();
-		}
-	}
 
-	static int FindNextOpenClientSlot()
-	{
+		int slot = -1;
+		bool logFullSlotDiagnostics = false;
+
 		lock (syncRoot)
 		{
 			for (int i = 0; i < Main.maxNetPlayers; i++)
 			{
 				if (!Netplay.Clients[i].IsConnected())
 				{
-					return i;
+					slot = i;
+					Netplay.Clients[i].Reset();
+					Netplay.Clients[i].Socket = args.client;
+					break;
 				}
 			}
+
+			if (slot == -1 && DateTime.UtcNow - _lastFullSlotDiagnosticUtc >= TimeSpan.FromSeconds(30))
+			{
+				_lastFullSlotDiagnosticUtc = DateTime.UtcNow;
+				logFullSlotDiagnostics = true;
+			}
 		}
-		return -1;
+
+		if (slot != -1)
+		{
+			return;
+		}
+
+		if (logFullSlotDiagnostics)
+		{
+			LogFullSlotDiagnostics();
+		}
+
+		Netplay.KickClient(new CloseAfterSendSocket(args.client), NetworkText.FromKey("CLI.ServerIsFull"));
+	}
+
+	private sealed class CloseAfterSendSocket : ISocket
+	{
+		private readonly ISocket _inner;
+
+		public CloseAfterSendSocket(ISocket inner)
+		{
+			_inner = inner;
+		}
+
+		void ISocket.Close()
+		{
+			_inner.Close();
+		}
+
+		bool ISocket.IsConnected()
+		{
+			return _inner.IsConnected();
+		}
+
+		void ISocket.Connect(RemoteAddress address)
+		{
+			_inner.Connect(address);
+		}
+
+		void ISocket.AsyncSend(byte[] data, int offset, int size, SocketSendCallback callback, object state)
+		{
+			_inner.AsyncSend(data, offset, size, callbackState =>
+			{
+				try
+				{
+					callback(callbackState);
+				}
+				finally
+				{
+					_inner.Close();
+				}
+			}, state);
+		}
+
+		void ISocket.AsyncReceive(byte[] data, int offset, int size, SocketReceiveCallback callback, object state)
+		{
+			_inner.AsyncReceive(data, offset, size, callback, state);
+		}
+
+		bool ISocket.IsDataAvailable()
+		{
+			return _inner.IsDataAvailable();
+		}
+
+		RemoteAddress ISocket.GetRemoteAddress()
+		{
+			return _inner.GetRemoteAddress();
+		}
+
+		bool ISocket.StartListening(SocketConnectionAccepted callback)
+		{
+			return _inner.StartListening(callback);
+		}
+
+		void ISocket.StopListening()
+		{
+			_inner.StopListening();
+		}
+	}
+
+	static void LogFullSlotDiagnostics()
+	{
+		Console.WriteLine($"[TSAPI] No open client slots. Dumping {Main.maxNetPlayers} RemoteClient entries:");
+		for (int i = 0; i < Main.maxNetPlayers; i++)
+		{
+			RemoteClient client = Netplay.Clients[i];
+			bool clientConnected;
+			bool socketConnected;
+			string remoteAddress;
+
+			try
+			{
+				clientConnected = client.IsConnected();
+			}
+			catch (Exception ex)
+			{
+				clientConnected = false;
+				Console.WriteLine($"[TSAPI] Slot {i}: client IsConnected() threw {ex.GetType().Name}: {ex.Message}");
+			}
+
+			try
+			{
+				socketConnected = client.Socket?.IsConnected() ?? false;
+			}
+			catch
+			{
+				socketConnected = false;
+			}
+
+			try
+			{
+				remoteAddress = client.Socket == null ? "<null>" : client.Socket.GetRemoteAddress().ToString();
+			}
+			catch (Exception ex)
+			{
+				remoteAddress = $"<error:{ex.GetType().Name}>";
+			}
+
+			Console.WriteLine(
+				$"[TSAPI] Slot {i}: State={client.State}, IsActive={client.IsActive}, " +
+				$"ClientConnected={clientConnected}, SocketConnected={socketConnected}, " +
+				$"TimeOutTimer={client.TimeOutTimer}, PendingTerminationApproved={client.PendingTerminationApproved}, " +
+				$"SocketNull={client.Socket == null}, Remote={remoteAddress}");
+		}
 	}
 }
