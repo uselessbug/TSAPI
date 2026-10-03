@@ -1,6 +1,7 @@
 ﻿using OTAPI;
 using System;
 using Terraria;
+using Terraria.Localization;
 using Terraria.Net;
 
 namespace TerrariaApi.Server.Hooking;
@@ -189,11 +190,13 @@ internal class NetHooks
 		{
 			Netplay.Clients[slot].Reset();
 			Netplay.Clients[slot].Socket = args.client;
+			return;
 		}
-		if (FindNextOpenClientSlot() == -1)
-		{
-			Netplay.TcpListener?.StopListening();
-		}
+
+		// Terraria 1.4.5.7+ keeps the listener alive when all client slots are in use.
+		// Mirror vanilla by rejecting only the incoming connection instead of stopping
+		// the listener, which no longer has a restart path tied to Netplay.IsListening.
+		Netplay.KickClient(args.client, NetworkText.FromKey("CLI.ServerIsFull"));
 	}
 
 	static int FindNextOpenClientSlot()
